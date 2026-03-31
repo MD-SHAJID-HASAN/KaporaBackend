@@ -23,7 +23,7 @@ const allowedOrigins = [
   "http://localhost:5173",
   "http://localhost:5174",
   "http://localhost:3000",
-  "https://yourownshoppingstore.netlify.app",
+  "https://kapora.netlify.app",
 ];
 
 const corsOptions = {
@@ -71,8 +71,8 @@ app.get("/", (req, res) => {
 
 // MongoDB connection
 
-const mongoURI = "mongodb://127.0.0.1:27017/ecommerce";
-// const mongoURI = process.env.DB_URI || "mongodb://127.0.0.1:27017/ecommerce";
+// const mongoURI = "mongodb://127.0.0.1:27017/ecommerce";
+const mongoURI = process.env.DB_URI;
 
 mongoose
   .connect(mongoURI, {
