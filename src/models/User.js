@@ -10,7 +10,7 @@ const userSchema = new mongoose.Schema(
     },
     email: {
       type: String,
-      required: true,
+      required: false,
       unique: true,
       lowercase: true,
       trim: true,
@@ -34,38 +34,38 @@ const userSchema = new mongoose.Schema(
     // --- Personal Details ---
     dob: {
       type: Date,
-      required: true,
+      required: false,
     },
     gender: {
       type: String,
       enum: ["Male", "Female", "Other"],
-      required: true,
+      required: false,
     },
 
     // --- Location Details ---
     division: {
       type: String,
-      required: true,
+      required: false,
       trim: true,
     },
     district: {
       type: String,
-      required: true,
+      required: false,
       trim: true,
     },
     upazila: {
       type: String,
-      required: true,
+      required: false,
       trim: true,
     },
     union: {
       type: String,
-      required: true,
+      required: false,
       trim: true,
     },
     address: {
       type: String,
-      required: true,
+      required: false,
       trim: true,
     },
 
