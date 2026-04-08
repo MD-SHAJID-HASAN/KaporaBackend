@@ -12,12 +12,11 @@ const variationSchema = new mongoose.Schema(
       type: String,
       required: true,
       trim: true,
-      // unique: true,
       sparse: true,
     },
     attributes: {
       type: Map,
-      of: String,
+      of: String, // e.g., { "size": "M", "color": "Blue" }
     },
     price: {
       type: Number,
@@ -35,8 +34,13 @@ const variationSchema = new mongoose.Schema(
       min: 0,
     },
   },
-  { _id: true }
+  { _id: true, toJSON: { virtuals: true }, toObject: { virtuals: true } }
 );
+
+// Virtual for profit per variation
+variationSchema.virtual("profit").get(function () {
+  return this.price - this.costPrice;
+});
 
 /*
 |--------------------------------------------------------------------------
@@ -50,40 +54,30 @@ const productSchema = new mongoose.Schema(
       required: [true, "Product name is required"],
       trim: true,
     },
-
     slug: {
       type: String,
       unique: true,
       index: true,
     },
-
     sku: {
       type: String,
       unique: true,
       sparse: true,
       index: true,
     },
-
     description: String,
-
     category: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Category",
       required: true,
       index: true,
     },
-
-    /*
-    |--------------------------------------------------------------------------
-    | Pricing
-    |--------------------------------------------------------------------------
-    */
+    /* Pricing */
     basePrice: {
       type: Number,
       required: true,
       min: 0,
     },
-
     discount: {
       type: {
         type: String,
@@ -95,131 +89,88 @@ const productSchema = new mongoose.Schema(
         min: 0,
       },
     },
-
-    /*
-    |--------------------------------------------------------------------------
-    | Dynamic Attributes
-    |--------------------------------------------------------------------------
-    */
+    /* Dynamic Attributes for UI Filtering */
     attributes: {
       type: Map,
-      of: String,
+      of: [String], // Changed to array: { "color": ["Red", "Blue"], "size": ["M", "L"] }
     },
-
-    /*
-    |--------------------------------------------------------------------------
-    | Variations
-    |--------------------------------------------------------------------------
-    */
     hasVariation: {
       type: Boolean,
       default: false,
     },
-
     variations: [variationSchema],
-
-    /*
-    |--------------------------------------------------------------------------
-    | Inventory
-    |--------------------------------------------------------------------------
-    */
+    /* Inventory - Now strictly controlled by hooks */
     stock: {
       type: Number,
       default: 0,
       min: 0,
     },
-
-    /*
-    |--------------------------------------------------------------------------
-    | Media
-    |--------------------------------------------------------------------------
-    */
+    /* Media */
     images: [
       {
         url: String,
         public_id: String,
+        isDefault: { type: Boolean, default: false }
       },
     ],
-
-    /*
-    |--------------------------------------------------------------------------
-    | Status
-    |--------------------------------------------------------------------------
-    */
     status: {
       type: String,
       enum: ["draft", "active", "archived"],
       default: "draft",
       index: true,
     },
-
-    /*
-    |--------------------------------------------------------------------------
-    | SEO
-    |--------------------------------------------------------------------------
-    */
+    /* SEO */
     seo: {
       title: String,
       description: String,
       keywords: [String],
     },
-
     createdBy: {
-      type: String,
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User", // Corrected to reference User Model
       required: true,
-      trim: true,
     },
   },
-  { timestamps: true }
+  { 
+    timestamps: true,
+    toJSON: { virtuals: true },
+    toObject: { virtuals: true }
+  }
 );
 
 /*
 |--------------------------------------------------------------------------
-| INDEXES (Performance Optimized)
+| INDEXES
 |--------------------------------------------------------------------------
 */
-
-// Category + Status filtering
 productSchema.index({ category: 1, status: 1 });
-
-// Variation SKU search
-productSchema.index(
-  { "variations.sku": 1 },
-  { unique: true, sparse: true }
-);
-
-// TEXT SEARCH (IMPORTANT)
-productSchema.index({
-  name: "text",
-  description: "text",
-});
+productSchema.index({ "variations.sku": 1 }, { unique: true, sparse: true });
+productSchema.index({ name: "text", description: "text" });
 
 /*
 |--------------------------------------------------------------------------
-| PRE-SAVE HOOKS
+| PRE-VALIDATE & PRE-SAVE HOOKS
 |--------------------------------------------------------------------------
 */
 
-// Auto-generate slug safely
-productSchema.pre("save", function (next) {
+// 1. Logic for Slug and Inventory Sync
+productSchema.pre("validate", function (next) {
+  // Slug generation
   if (this.isModified("name")) {
     this.slug = slugify(this.name, { lower: true, strict: true });
   }
-  next();
-});
 
-// Auto-calculate total stock from variations
-productSchema.pre("save", function (next) {
-  if (this.hasVariation && this.variations.length > 0) {
-    this.stock = this.variations.reduce(
-      (sum, v) => sum + (Number(v.stock) || 0),
-      0
-    );
+  // Auto-calculate total stock from variations to ensure DB consistency
+  if (this.hasVariation && this.variations && this.variations.length > 0) {
+    this.stock = this.variations.reduce((sum, v) => sum + (Number(v.stock) || 0), 0);
+    
+    // Safety check: If variations exist, basePrice should ideally match the first variation
+    // unless you want them to differ. 
   }
   next();
 });
 
-// Prevent invalid discount
+// 2. Discount Validation
 productSchema.pre("save", function (next) {
   if (!this.discount || !this.discount.value) return next();
 
@@ -227,10 +178,7 @@ productSchema.pre("save", function (next) {
     return next(new Error("Percentage discount cannot exceed 100"));
   }
 
-  if (
-    this.discount.type === "fixed" &&
-    this.discount.value > this.basePrice
-  ) {
+  if (this.discount.type === "fixed" && this.discount.value > this.basePrice) {
     return next(new Error("Fixed discount cannot exceed base price"));
   }
 
@@ -243,38 +191,28 @@ productSchema.pre("save", function (next) {
 |--------------------------------------------------------------------------
 */
 
-// Final Price After Discount
+// Final Price calculation (For the frontend's "single price" display)
 productSchema.virtual("finalPrice").get(function () {
-  if (!this.discount || !this.discount.value) return this.basePrice;
+  const priceToCalculate = this.basePrice;
+  
+  if (!this.discount || !this.discount.value) return priceToCalculate;
 
   if (this.discount.type === "percentage") {
-    return this.basePrice - (this.basePrice * this.discount.value) / 100;
+    return priceToCalculate - (priceToCalculate * this.discount.value) / 100;
   }
 
   if (this.discount.type === "fixed") {
-    return this.basePrice - this.discount.value;
+    return priceToCalculate - this.discount.value;
   }
 
-  return this.basePrice;
+  return priceToCalculate;
 });
 
-// Profit Margin (Advanced)
-productSchema.virtual("profitMargin").get(function () {
-  if (!this.variations.length) return null;
-
-  const avgCost =
-    this.variations.reduce((sum, v) => sum + v.costPrice, 0) /
-    this.variations.length;
-
+// Overall Profit Margin based on basePrice vs average variation cost
+productSchema.virtual("estimatedProfit").get(function () {
+  if (!this.variations.length) return this.basePrice;
+  const avgCost = this.variations.reduce((sum, v) => sum + v.costPrice, 0) / this.variations.length;
   return this.basePrice - avgCost;
 });
 
-productSchema.set("toJSON", { virtuals: true });
-productSchema.set("toObject", { virtuals: true });
-
-/*
-|--------------------------------------------------------------------------
-| EXPORT MODEL
-|--------------------------------------------------------------------------
-*/
 export default mongoose.model("Product", productSchema);

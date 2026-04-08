@@ -72,18 +72,21 @@ const orderItemSchema = new mongoose.Schema(
 /* |-------------------------------------------------------------------------- |
 | Address Schema
 |-------------------------------------------------------------------------- */
+
 const addressSchema = new mongoose.Schema(
   {
-    fullName: String,
-    phone: String,
-    street: String,
-    city: String,
-    state: String,
-    postalCode: String,
-    country: String,
+    fullName: { type: String, required: true },
+    phone: { type: String, required: true },
+    email: {type: String, default: "", required: false},
+    division: { type: String, required: true },
+    district: { type: String, required: true },
+    area: { type: String, required: true },
+    address: { type: String, required: true },
+    postalCode: { type: String, default: "" },
   },
   { _id: false }
 );
+
 
 /* |-------------------------------------------------------------------------- |
 | Payment Schema
@@ -126,7 +129,7 @@ const orderSchema = new mongoose.Schema(
     userId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
-      required: true,
+      // required: true, 
       index: true,
     },
 

@@ -9,6 +9,7 @@ import {
 
 import {
   verifyToken,
+  optionalVerifyToken,
   isAdmin,
 } from "../middleware/authMiddleware.js";
 
@@ -19,7 +20,7 @@ const router = express.Router();
 /* -------------------------------------------------------------------------- */
 
 // Place order
-router.post("/", verifyToken, placeOrder);
+router.post("/", optionalVerifyToken, placeOrder);
 
 // Get logged-in user's orders
 router.get("/my-orders", verifyToken, getUserOrders);

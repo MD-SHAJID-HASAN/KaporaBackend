@@ -3,11 +3,11 @@ import Category from "../models/Category.js";
 import cloudinary from "../config/cloudinary.js";
 
 /**
- * HELPER: Recursively find all child category IDs for a given parent
+ * HELPER: Find all child category IDs (Recursive)
  */
 const getAllCategoryIds = async (parentId) => {
   let ids = [parentId];
-  const children = await Category.find({ parentId });
+  const children = await Category.find({ parentId }).select("_id").lean();
   for (const child of children) {
     const childIds = await getAllCategoryIds(child._id);
     ids = [...ids, ...childIds];
@@ -15,70 +15,70 @@ const getAllCategoryIds = async (parentId) => {
   return ids;
 };
 
+/**
+ * POST: Create a new product
+ */
 export const createProduct = async (req, res) => {
+  console.log(req.user)
   try {
-    const { name, basePrice, stock, category, description, discount, attributes, hasVariation, status } = req.body;
-    const seo = req.body.seo ? JSON.parse(req.body.seo) : {};
+    const { name, basePrice, category, description, status, hasVariation } = req.body;
+
     const variations = req.body.variations ? JSON.parse(req.body.variations) : [];
+    const attributes = req.body.attributes ? JSON.parse(req.body.attributes) : {};
+    const seo = req.body.seo ? JSON.parse(req.body.seo) : {};
+    const discount = req.body.discount ? JSON.parse(req.body.discount) : { type: "fixed", value: 0 };
 
     let imagesArray = [];
-    if (req.files?.length > 0) {
-      imagesArray = req.files.map((file) => ({
+    if (req.files && req.files.length > 0) {
+      imagesArray = req.files.map((file, index) => ({
         url: file.path,
         public_id: file.filename,
+        isDefault: index === 0,
       }));
     }
 
-    if (!name || !basePrice || !category) {
-      return res.status(400).json({ message: "Name, basePrice and category are required" });
-    }
-
-    let totalStock = Number(stock) || 0;
-    if (hasVariation === "true" && Array.isArray(variations)) {
-      totalStock = variations.reduce((sum, v) => sum + (Number(v.stock) || 0), 0);
-    }
-
-    const product = await Product.create({
+    const product = new Product({
       name,
       basePrice: Number(basePrice),
-      stock: totalStock,
       category,
       description,
-      discount: Number(discount) || 0,
-      attributes: attributes ? JSON.parse(attributes) : [],
+      status: status || "draft",
       hasVariation: hasVariation === "true",
       variations: hasVariation === "true" ? variations : [],
-      images: imagesArray,
-      status: status || "draft",
+      stock: hasVariation === "true" ? 0 : Number(req.body.stock || 0),
+      attributes,
+      discount,
       seo,
-      createdBy: req.user?.id || "system",
+      images: imagesArray,
+      createdBy: req.user?.id,
     });
 
+    await product.save();
     res.status(201).json({ message: "Product created successfully", product });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 };
 
+/**
+ * GET: All products with filters and pagination
+ */
 export const getProducts = async (req, res) => {
   try {
     const { page = 1, limit = 12, search, category, status, minPrice, maxPrice, sortBy = "createdAt", order = "desc" } = req.query;
     let filter = {};
 
     if (search) {
-      filter.$or = [
-        { name: { $regex: search, $options: "i" } },
-        { description: { $regex: search, $options: "i" } },
-      ];
+      filter.$text = { $search: search };
     }
 
-    // RECURSIVE CATEGORY FILTER
     if (category) {
       const categoryFamilyIds = await getAllCategoryIds(category);
       filter.category = { $in: categoryFamilyIds };
     }
 
     if (status) filter.status = status;
+
     if (minPrice || maxPrice) {
       filter.basePrice = {};
       if (minPrice) filter.basePrice.$gte = Number(minPrice);
@@ -86,10 +86,11 @@ export const getProducts = async (req, res) => {
     }
 
     const sortOptions = { [sortBy]: order === "asc" ? 1 : -1 };
+    
     const products = await Product.find(filter)
       .populate("category", "name slug")
       .sort(sortOptions)
-      .skip((page - 1) * limit)
+      .skip((Number(page) - 1) * Number(limit))
       .limit(Number(limit));
 
     const total = await Product.countDocuments(filter);
@@ -105,9 +106,12 @@ export const getProducts = async (req, res) => {
   }
 };
 
+/**
+ * GET: Single product by ID
+ */
 export const getProduct = async (req, res) => {
   try {
-    const product = await Product.findById(req.params.id).populate("category");
+    const product = await Product.findById(req.params.id).populate("category", "name slug");
     if (!product) return res.status(404).json({ message: "Product not found" });
     res.json(product);
   } catch (err) {
@@ -115,52 +119,62 @@ export const getProduct = async (req, res) => {
   }
 };
 
+/**
+ * PUT: Update product details and images
+ */
 export const updateProduct = async (req, res) => {
   try {
     const product = await Product.findById(req.params.id);
     if (!product) return res.status(404).json({ message: "Product not found" });
 
-    const { name, basePrice, stock, category, description, discount, status, removeImages } = req.body;
-    const seo = req.body.seo ? JSON.parse(req.body.seo) : product.seo;
-    const variations = req.body.variations ? JSON.parse(req.body.variations) : product.variations;
-    const attributes = req.body.attributes ? JSON.parse(req.body.attributes) : product.attributes;
-    const hasVariation = req.body.hasVariation === "true";
+    const { name, basePrice, category, description, status, hasVariation, existingImages } = req.body;
 
-    let updatedImages = product.images || [];
+    // 1. Basic Fields
+    if (name) product.name = name;
+    if (basePrice) product.basePrice = Number(basePrice);
+    if (category) product.category = category;
+    if (description) product.description = description;
+    if (status) product.status = status;
 
-    if (removeImages) {
-      const removeList = JSON.parse(removeImages);
-      for (const public_id of removeList) {
-        await cloudinary.uploader.destroy(public_id);
-        updatedImages = updatedImages.filter((img) => img.public_id !== public_id);
+    // 2. Complex Objects
+    if (req.body.seo) product.seo = JSON.parse(req.body.seo);
+    if (req.body.attributes) product.attributes = JSON.parse(req.body.attributes);
+    if (req.body.discount) product.discount = JSON.parse(req.body.discount);
+
+    // 3. Variations & Stock
+    if (hasVariation !== undefined) {
+      product.hasVariation = hasVariation === "true";
+      if (product.hasVariation && req.body.variations) {
+        product.variations = JSON.parse(req.body.variations);
+      } else if (!product.hasVariation && req.body.stock) {
+        product.stock = Number(req.body.stock);
+        product.variations = [];
       }
     }
 
-    if (req.files?.length) {
-      const newImages = req.files.map((file) => ({
-        url: file.path,
-        public_id: file.filename,
-      }));
-      updatedImages = [...updatedImages, ...newImages];
+    // 4. Image Reconciliation (Delete from Cloudinary if removed on Frontend)
+    if (existingImages) {
+      const keptImages = JSON.parse(existingImages);
+      
+      // Find images that exist in DB but NOT in the kept list from Frontend
+      const imagesToRemove = product.images.filter(
+        (oldImg) => !keptImages.some((keep) => keep.public_id === oldImg.public_id)
+      );
+
+      for (const img of imagesToRemove) {
+        if (img.public_id) await cloudinary.uploader.destroy(img.public_id);
+      }
+
+      product.images = keptImages;
     }
 
-    product.name = name ?? product.name;
-    product.basePrice = basePrice ? Number(basePrice) : product.basePrice;
-    product.category = category ?? product.category;
-    product.description = description ?? product.description;
-    product.discount = discount ? Number(discount) : product.discount;
-    product.attributes = attributes;
-    product.status = status ?? product.status;
-    product.seo = seo;
-    product.images = updatedImages;
-    product.hasVariation = hasVariation;
-
-    if (product.hasVariation) {
-      product.variations = variations;
-      product.stock = variations.reduce((sum, v) => sum + (Number(v.stock) || 0), 0);
-    } else {
-      product.variations = [];
-      product.stock = stock ? Number(stock) : product.stock;
+    // 5. Append New Uploads
+    if (req.files && req.files.length > 0) {
+      const newImages = req.files.map(file => ({
+        url: file.path,
+        public_id: file.filename
+      }));
+      product.images.push(...newImages);
     }
 
     await product.save();
@@ -170,28 +184,37 @@ export const updateProduct = async (req, res) => {
   }
 };
 
+/**
+ * PATCH: Quick update for stock status or general status
+ */
 export const updateProductStockStatus = async (req, res) => {
   try {
-    const { id } = req.params;
-    const { stock, status } = req.body;
-    const updateData = {};
-    if (stock !== undefined) updateData.stock = Number(stock);
-    if (status) updateData.status = status;
-
-    const product = await Product.findByIdAndUpdate(id, { $set: updateData }, { new: true, runValidators: true });
+    const { status, stockStatus } = req.body;
+    const product = await Product.findById(req.params.id);
+    
     if (!product) return res.status(404).json({ message: "Product not found" });
-    return res.status(200).json({ message: "Quick update successful", product });
+
+    if (status) product.status = status;
+    if (stockStatus) product.stockStatus = stockStatus;
+
+    await product.save();
+    res.json({ message: "Status updated successfully", product });
   } catch (err) {
-    return res.status(500).json({ message: err.message });
+    res.status(500).json({ message: err.message });
   }
 };
 
+/**
+ * DELETE: Archive product (Logical Delete)
+ */
 export const deleteProduct = async (req, res) => {
   try {
     const product = await Product.findById(req.params.id);
     if (!product) return res.status(404).json({ message: "Product not found" });
+
     product.status = "archived";
     await product.save();
+    
     res.json({ message: "Product archived successfully" });
   } catch (err) {
     res.status(500).json({ message: err.message });
