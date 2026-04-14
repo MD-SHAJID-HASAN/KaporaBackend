@@ -37,7 +37,6 @@ const variationSchema = new mongoose.Schema(
   { _id: true, toJSON: { virtuals: true }, toObject: { virtuals: true } }
 );
 
-// Virtual for profit per variation
 variationSchema.virtual("profit").get(function () {
   return this.price - this.costPrice;
 });
@@ -72,7 +71,6 @@ const productSchema = new mongoose.Schema(
       required: true,
       index: true,
     },
-    /* Pricing */
     basePrice: {
       type: Number,
       required: true,
@@ -89,23 +87,20 @@ const productSchema = new mongoose.Schema(
         min: 0,
       },
     },
-    /* Dynamic Attributes for UI Filtering */
     attributes: {
       type: Map,
-      of: [String], // Changed to array: { "color": ["Red", "Blue"], "size": ["M", "L"] }
+      of: [String], // UI Filter Map: { "color": ["Red", "Blue"] }
     },
     hasVariation: {
       type: Boolean,
       default: false,
     },
     variations: [variationSchema],
-    /* Inventory - Now strictly controlled by hooks */
     stock: {
       type: Number,
       default: 0,
       min: 0,
     },
-    /* Media */
     images: [
       {
         url: String,
@@ -119,7 +114,6 @@ const productSchema = new mongoose.Schema(
       default: "draft",
       index: true,
     },
-    /* SEO */
     seo: {
       title: String,
       description: String,
@@ -127,11 +121,11 @@ const productSchema = new mongoose.Schema(
     },
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: "User", // Corrected to reference User Model
+      ref: "User",
       required: true,
     },
   },
-  { 
+  {
     timestamps: true,
     toJSON: { virtuals: true },
     toObject: { virtuals: true }
@@ -149,28 +143,53 @@ productSchema.index({ name: "text", description: "text" });
 
 /*
 |--------------------------------------------------------------------------
-| PRE-VALIDATE & PRE-SAVE HOOKS
+| PRE-VALIDATE HOOKS (Business Logic)
 |--------------------------------------------------------------------------
 */
 
-// 1. Logic for Slug and Inventory Sync
 productSchema.pre("validate", function (next) {
-  // Slug generation
+  // 1. Slug generation
   if (this.isModified("name")) {
     this.slug = slugify(this.name, { lower: true, strict: true });
   }
 
-  // Auto-calculate total stock from variations to ensure DB consistency
+  // 2. Variation Logic: Price, Stock, and Attribute Sync
   if (this.hasVariation && this.variations && this.variations.length > 0) {
-    this.stock = this.variations.reduce((sum, v) => sum + (Number(v.stock) || 0), 0);
-    
-    // Safety check: If variations exist, basePrice should ideally match the first variation
-    // unless you want them to differ. 
+    let minPrice = Infinity;
+    let totalStock = 0;
+    const attrMap = new Map();
+
+    this.variations.forEach((v) => {
+      // Find Minimum Price for basePrice
+      if (v.price < minPrice) minPrice = v.price;
+
+      // Accumulate Stock
+      totalStock += (Number(v.stock) || 0);
+
+      // Sync attributes to the top-level for filtering
+      if (v.attributes) {
+        v.attributes.forEach((val, key) => {
+          if (!attrMap.has(key)) attrMap.set(key, new Set());
+          attrMap.get(key).add(val);
+        });
+      }
+    });
+
+    this.basePrice = minPrice === Infinity ? this.basePrice : minPrice;
+    this.stock = totalStock;
+
+    // Convert Sets back to Arrays for the Map
+    const finalAttributes = {};
+    attrMap.forEach((valSet, key) => {
+      finalAttributes[key] = Array.from(valSet);
+    });
+    this.attributes = finalAttributes;
   }
+
   next();
 });
 
-// 2. Discount Validation
+// Discount Validation
 productSchema.pre("save", function (next) {
   if (!this.discount || !this.discount.value) return next();
 
@@ -187,32 +206,51 @@ productSchema.pre("save", function (next) {
 
 /*
 |--------------------------------------------------------------------------
-| VIRTUALS
+| VIRTUALS & HELPERS
 |--------------------------------------------------------------------------
 */
 
-// Final Price calculation (For the frontend's "single price" display)
+const calculateDiscount = (price, discount) => {
+  if (!discount || !discount.value || discount.value <= 0) return price;
+  let final = price;
+  if (discount.type === "percentage") {
+    final = price - (price * (discount.value / 100));
+  } else if (discount.type === "fixed") {
+    final = price - discount.value;
+  }
+  return Math.max(0, Math.round((final + Number.EPSILON) * 100) / 100);
+};
+
 productSchema.virtual("finalPrice").get(function () {
-  const priceToCalculate = this.basePrice;
-  
-  if (!this.discount || !this.discount.value) return priceToCalculate;
-
-  if (this.discount.type === "percentage") {
-    return priceToCalculate - (priceToCalculate * this.discount.value) / 100;
-  }
-
-  if (this.discount.type === "fixed") {
-    return priceToCalculate - this.discount.value;
-  }
-
-  return priceToCalculate;
+  return calculateDiscount(this.basePrice, this.discount);
 });
 
-// Overall Profit Margin based on basePrice vs average variation cost
+productSchema.virtual("priceRange").get(function () {
+  if (!this.hasVariation || !this.variations || this.variations.length === 0) {
+    const price = calculateDiscount(this.basePrice, this.discount);
+    return { min: price, max: price, hasRange: false };
+  }
+
+  const discountedPrices = this.variations.map(v =>
+    calculateDiscount(v.price, this.discount)
+  );
+
+  const min = Math.min(...discountedPrices);
+  const max = Math.max(...discountedPrices);
+
+  return { min, max, hasRange: min !== max };
+});
+
 productSchema.virtual("estimatedProfit").get(function () {
-  if (!this.variations.length) return this.basePrice;
-  const avgCost = this.variations.reduce((sum, v) => sum + v.costPrice, 0) / this.variations.length;
-  return this.basePrice - avgCost;
+  const currentPrice = calculateDiscount(this.basePrice, this.discount);
+  if (!this.variations || this.variations.length === 0) {
+    return currentPrice - (this.costPrice || 0);
+  }
+  const totalProfit = this.variations.reduce((sum, v) => {
+    const vFinalPrice = calculateDiscount(v.price, this.discount);
+    return sum + (vFinalPrice - v.costPrice);
+  }, 0);
+  return Math.round((totalProfit / this.variations.length + Number.EPSILON) * 100) / 100;
 });
 
 export default mongoose.model("Product", productSchema);

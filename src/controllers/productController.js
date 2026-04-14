@@ -1,6 +1,6 @@
 import Product from "../models/Product.js";
 import Category from "../models/Category.js";
-import cloudinary from "../config/cloudinary.js";
+import { uploadToStorj, deleteFromStorj } from "../utils/storage.js";
 
 /**
  * HELPER: Find all child category IDs (Recursive)
@@ -19,7 +19,6 @@ const getAllCategoryIds = async (parentId) => {
  * POST: Create a new product
  */
 export const createProduct = async (req, res) => {
-  console.log(req.user)
   try {
     const { name, basePrice, category, description, status, hasVariation } = req.body;
 
@@ -30,9 +29,13 @@ export const createProduct = async (req, res) => {
 
     let imagesArray = [];
     if (req.files && req.files.length > 0) {
-      imagesArray = req.files.map((file, index) => ({
-        url: file.path,
-        public_id: file.filename,
+      // Parallel upload to Storj
+      const uploadPromises = req.files.map((file) => uploadToStorj(file));
+      const uploadResults = await Promise.all(uploadPromises);
+
+      imagesArray = uploadResults.map((result, index) => ({
+        url: result.ikUrl,          // ImageKit URL for frontend display
+        public_id: result.filePath, // Storj path stored for future deletion
         isDefault: index === 0,
       }));
     }
@@ -86,7 +89,7 @@ export const getProducts = async (req, res) => {
     }
 
     const sortOptions = { [sortBy]: order === "asc" ? 1 : -1 };
-    
+
     const products = await Product.find(filter)
       .populate("category", "name slug")
       .sort(sortOptions)
@@ -129,14 +132,14 @@ export const updateProduct = async (req, res) => {
 
     const { name, basePrice, category, description, status, hasVariation, existingImages } = req.body;
 
-    // 1. Basic Fields
+    // 1. Update Basic Fields
     if (name) product.name = name;
     if (basePrice) product.basePrice = Number(basePrice);
     if (category) product.category = category;
     if (description) product.description = description;
     if (status) product.status = status;
 
-    // 2. Complex Objects
+    // 2. Parse Complex Objects
     if (req.body.seo) product.seo = JSON.parse(req.body.seo);
     if (req.body.attributes) product.attributes = JSON.parse(req.body.attributes);
     if (req.body.discount) product.discount = JSON.parse(req.body.discount);
@@ -152,27 +155,31 @@ export const updateProduct = async (req, res) => {
       }
     }
 
-    // 4. Image Reconciliation (Delete from Cloudinary if removed on Frontend)
+    // 4. Image Reconciliation (Delete from Storj if removed on Frontend)
     if (existingImages) {
       const keptImages = JSON.parse(existingImages);
-      
-      // Find images that exist in DB but NOT in the kept list from Frontend
+
+      // Identify images to delete
       const imagesToRemove = product.images.filter(
         (oldImg) => !keptImages.some((keep) => keep.public_id === oldImg.public_id)
       );
 
+      // Execute deletion from Storj
       for (const img of imagesToRemove) {
-        if (img.public_id) await cloudinary.uploader.destroy(img.public_id);
+        if (img.public_id) await deleteFromStorj(img.public_id);
       }
 
       product.images = keptImages;
     }
 
-    // 5. Append New Uploads
+    // 5. Append New Storj Uploads
     if (req.files && req.files.length > 0) {
-      const newImages = req.files.map(file => ({
-        url: file.path,
-        public_id: file.filename
+      const uploadPromises = req.files.map((file) => uploadToStorj(file));
+      const uploadResults = await Promise.all(uploadPromises);
+
+      const newImages = uploadResults.map((result) => ({
+        url: result.ikUrl,
+        public_id: result.filePath,
       }));
       product.images.push(...newImages);
     }
@@ -187,19 +194,35 @@ export const updateProduct = async (req, res) => {
 /**
  * PATCH: Quick update for stock status or general status
  */
+/**
+ * PATCH: Quick update for stock or status
+ */
 export const updateProductStockStatus = async (req, res) => {
   try {
-    const { status, stockStatus } = req.body;
+    // 1. Change 'stockStatus' to 'stock' (or whatever your frontend is sending)
+    const { status, stock } = req.body; 
     const product = await Product.findById(req.params.id);
-    
+
     if (!product) return res.status(404).json({ message: "Product not found" });
 
+    // 2. Update status (active/draft/archived)
     if (status) product.status = status;
-    if (stockStatus) product.stockStatus = stockStatus;
+
+    // 3. Update stock only if the product doesn't have variations
+    // Because if it HAS variations, our new schema hook calculates stock automatically!
+    if (stock !== undefined) {
+      if (product.hasVariation) {
+        return res.status(400).json({ 
+          message: "Cannot manually update stock for products with variations. Update individual variations instead." 
+        });
+      }
+      product.stock = Number(stock);
+    }
 
     await product.save();
-    res.json({ message: "Status updated successfully", product });
+    res.json({ message: "Update successful", product });
   } catch (err) {
+    // This is where your 500 error was being caught
     res.status(500).json({ message: err.message });
   }
 };
@@ -214,7 +237,7 @@ export const deleteProduct = async (req, res) => {
 
     product.status = "archived";
     await product.save();
-    
+
     res.json({ message: "Product archived successfully" });
   } catch (err) {
     res.status(500).json({ message: err.message });

@@ -1,17 +1,22 @@
 import multer from "multer";
-import { CloudinaryStorage } from "multer-storage-cloudinary";
-import cloudinary from "./cloudinary.js";
 
-const storage = new CloudinaryStorage({
-  cloudinary,
-  params: {
-    folder: "products",
-    allowed_formats: ["jpg", "png", "jpeg", "webp", "avif"],
-  },
-  filename: (req, file, cb) => {
-    cb(null, file.originalname);
+// Use memoryStorage for S3-compatible uploads (Storj)
+// This is also the safest option for Render's 512MB RAM limit
+const storage = multer.memoryStorage();
+
+// Add file filter to keep your bucket clean from non-image files
+const fileFilter = (req, file, cb) => {
+  if (file.mimetype.startsWith("image/")) {
+    cb(null, true);
+  } else {
+    cb(new Error("Not an image! Please upload only images."), false);
+  }
+};
+
+export const uploadMultiple = multer({
+  storage,
+  fileFilter,
+  limits: {
+    fileSize: 2 * 1024 * 1024, // Limit size to 5MB per file
   }
 });
-
-export const uploadMultiple = multer({ storage });
-
